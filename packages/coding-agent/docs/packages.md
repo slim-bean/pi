@@ -170,6 +170,15 @@ Third party runtime dependencies belong in `dependencies` in `package.json`. Dep
 
 Pi bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `typebox`.
 
+Pi resolves those peers through loader aliases at load time and disables peer resolution for the installs it runs, so it never fetches them. Also mark them `optional` in `peerDependenciesMeta`; otherwise a plain `npm install` in your package (npm 7 and later auto-installs peer dependencies) pulls a second, unused copy of pi:
+
+```json
+{
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
+  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } }
+}
+```
+
 Other pi packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their resources through `node_modules/` paths. Pi loads packages with separate module roots, so separate installs do not collide or share modules.
 
 Example:
