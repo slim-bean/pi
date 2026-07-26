@@ -314,6 +314,9 @@ export class TUI extends Container {
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
+	// Lowest frame line whose repaint was skipped because it was above the
+	// viewport (see doRender). Infinity means the terminal matches previousLines.
+	private skippedAboveViewport = Number.POSITIVE_INFINITY;
 	private stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
@@ -1287,6 +1290,7 @@ export class TUI extends Container {
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
+			this.skippedAboveViewport = Number.POSITIVE_INFINITY;
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
 			if (clear) {
 				buffer += this.deleteKittyImages(this.previousKittyImageIds);
@@ -1336,6 +1340,22 @@ export class TUI extends Container {
 			fs.mkdirSync(path.dirname(logPath), { recursive: true });
 			fs.appendFileSync(logPath, msg);
 		};
+
+		// A line we declined to repaint (because it was above the viewport) becomes
+		// visible again if the frame shrinks far enough for the viewport to move back
+		// over it. Repaint once in that case so the terminal cannot keep showing
+		// content the renderer already considers written.
+		const nextViewportTop = Math.max(0, newLines.length - height);
+		if (
+			this.skippedAboveViewport !== Number.POSITIVE_INFINITY &&
+			Math.min(prevViewportTop, nextViewportTop) <= this.skippedAboveViewport
+		) {
+			logRedraw(
+				`skipped line back in viewport (skipped=${this.skippedAboveViewport}, prevTop=${prevViewportTop}, nextTop=${nextViewportTop})`,
+			);
+			fullRender(true);
+			return;
+		}
 
 		// First render - just output everything without clearing (assumes clean screen)
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
@@ -1455,8 +1475,53 @@ export class TUI extends Container {
 			return;
 		}
 
+		// Kitty image lifecycle belongs to the drawing paths: previousKittyImageIds
+		// is the set the terminal is believed to hold, and fullRender deletes
+		// exactly that set. Skipping a write while adopting a new set would drop
+		// the id of an image that is still on screen, leaving it undeletable. So
+		// the fast paths below only run when no image was added, removed or
+		// replaced. Computed lazily: only frames that change something above the
+		// viewport pay for the extra scan.
+		const changedAboveViewport = firstChanged < prevViewportTop;
+		const nextKittyImageIds = changedAboveViewport ? this.collectKittyImageIds(newLines) : undefined;
+		const kittyImagesUnchanged =
+			nextKittyImageIds !== undefined &&
+			nextKittyImageIds.size === this.previousKittyImageIds.size &&
+			[...nextKittyImageIds].every((id) => this.previousKittyImageIds.has(id));
+
+		// Every changed line is above the viewport, so the visible rows are
+		// unchanged: there is nothing to draw. Accept the new frame and return
+		// instead of clearing the screen and reprinting it identically.
+		if (kittyImagesUnchanged && lastChanged < prevViewportTop && newLines.length === this.previousLines.length) {
+			logRedraw(`offscreen-only change (${firstChanged}..${lastChanged} < ${prevViewportTop})`);
+			this.skippedAboveViewport = Math.min(this.skippedAboveViewport, firstChanged);
+			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.previousLines = newLines;
+			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.previousWidth = width;
+			this.previousHeight = height;
+			this.previousViewportTop = prevViewportTop;
+			return;
+		}
+
+		// The change starts above the viewport but reaches into it. Only the
+		// visible part can be seen, so clamp the repaint to the viewport top
+		// rather than falling back to a full redraw. Skipped only when the frame
+		// shrank: the shrink path above owns clearing the vacated rows, and
+		// clamping past the new frame end would leave them untouched.
+		if (
+			kittyImagesUnchanged &&
+			firstChanged < prevViewportTop &&
+			newLines.length >= this.previousLines.length &&
+			prevViewportTop <= Math.min(lastChanged, newLines.length - 1)
+		) {
+			logRedraw(`clamped to viewport (${firstChanged} -> ${prevViewportTop})`);
+			this.skippedAboveViewport = Math.min(this.skippedAboveViewport, firstChanged);
+			firstChanged = prevViewportTop;
+		}
+
 		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
+		// If the first changed line is still above the previous viewport, we need a full redraw.
 		if (firstChanged < prevViewportTop) {
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
 			fullRender(true);
