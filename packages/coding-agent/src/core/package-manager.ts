@@ -1763,7 +1763,11 @@ export class DefaultPackageManager implements PackageManager {
 		if (configuredCommand && configuredCommand.length > 0) {
 			return ["install"];
 		}
-		return ["install", "--omit=dev"];
+		// Git packages resolve pi APIs through loader aliases/virtual modules, exactly like
+		// managed npm installs (see getNpmInstallArgs), so peer resolution must be disabled
+		// here too. npm >= 7 otherwise auto-installs the host-provided @earendil-works/pi-*
+		// and typebox peers into every clone.
+		return ["install", "--omit=dev", "--legacy-peer-deps"];
 	}
 
 	private runNpmCommandSync(args: string[]): string {
